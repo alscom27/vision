@@ -1,0 +1,44 @@
+# Python 기본
+__pycache__/
+*.py[cod]
+*.log
+*.cache
+
+# Jupyter
+.ipynb_checkpoints/
+
+# 가상환경
+.env
+.venv/
+env/
+venv/
+
+# VSCode
+.vscode/
+
+# 시스템 파일
+.DS_Store
+Thumbs.db
+
+# YOLOv8 학습 결과 및 모델
+runs/
+*.pt
+*.onnx
+*.tflite
+*.pb
+*.engine
+
+# Roboflow export 및 캐시
+*.zip
+*.tar.gz
+*.jpg.anno.cache
+coco128/
+
+# 이미지 데이터 무시 (폴더만 유지)
+project/imgs/*
+!project/imgs/.gitkeep
+
+2025-06-09/files/*
+2025-06-09/imgs/*
+!2025-06-09/imgs/.gitkeep
+!2025-06-09/files/.gitkeep

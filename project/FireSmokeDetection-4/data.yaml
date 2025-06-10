@@ -1,0 +1,14 @@
+names:
+- Fire
+- fire
+- smoke
+nc: 3
+roboflow:
+  license: CC BY 4.0
+  project: firesmokedetection-5w49j
+  url: https://universe.roboflow.com/veli-t/firesmokedetection-5w49j/dataset/4
+  version: 4
+  workspace: veli-t
+test: ../test/images
+train: ../train/images
+val: ../valid/images
