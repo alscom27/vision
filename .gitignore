@@ -1,0 +1,107 @@
+# ▶ Python 기본
+__pycache__/
+*.py[cod]
+*.log
+*.cache
+
+# ▶ Jupyter Notebook
+.ipynb_checkpoints/
+
+# ▶ 가상환경
+.env
+.venv/
+env/
+venv/
+
+# ▶ VSCode 설정
+.vscode/
+
+# ▶ 시스템 파일
+.DS_Store
+Thumbs.db
+
+# ▶ YOLOv8 학습 결과 및 모델
+runs/
+*.pt
+*.onnx
+*.tflite
+*.pb
+*.engine
+
+# ▶ 이미지/라벨 데이터 무시 (폴더 구조는 유지)
+**/images/*.jpg
+**/images/*.jpeg
+**/images/*.png
+**/images/*.bmp
+**/labels/*.txt
+!**/images/.gitkeep
+!**/labels/.gitkeep
+
+# ▶ Roboflow 관련 캐시/설정
+*.zip
+*.tar.gz
+*.jpg.anno.cache
+*.labels.txt
+*.annotations.json
+*.xml
+coco128/
+README.dataset.txt
+README.roboflow.txt
+
+# ▶ Streamlit 관련 캐시
+.streamlit/
+.streamlit_cache/
+*.db
+
+# ▶ Ultralytics 내부 캐시 및 로그
+ultralytics/hub/*
+ultralytics/utils/cache/*
+*.log.*
+
+# ▶ 임시/백업 파일
+*.tmp
+*.bak
+
+# ▶ 프로젝트 내 다운로드 데이터셋 및 임시 폴더
+project/Fire_and_Smoke_seg5v11/
+project/Fire_and_Smoke_seg6v11/
+project/Fire-and-SMoke-Segmentation-6/
+project/FireSmokeDetection-4/
+project/FireSmokeDetection-v3/
+project/MergedDataset/
+project/predictions/
+project/runs/
+project/SmokeDetection/
+project/SmokeDetection_copy/
+project/imgs/
+project/새 폴더/
+!project/**/data.yaml
+!project/**/.gitkeep
+
+# ▶ 대용량 모델 및 문서 파일 무시
+*.h5
+*.weights
+*.pt
+*.pth
+*.tflite
+*.onnx
+*.pb
+*.engine
+*.zip
+*.tar.gz
+*.rar
+*.7z
+*.pptx
+*.PPTX
+*.ppt
+*.pdf
+
+# ▶ 예시 이미지 폴더 무시
+project/imgs/*
+!project/imgs/.gitkeep
+
+# ▶ 특정 날짜 폴더
+2025-06-09/files/*
+2025-06-09/imgs/*
+!2025-06-09/files/.gitkeep
+!2025-06-09/imgs/.gitkeep
