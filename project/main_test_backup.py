@@ -149,7 +149,6 @@ def process_video(cap, limit_time=60):
     global frame_count, inference_times, detection_log, alert_log
     global first_alert_time, first_alert_reason, first_alert_image
 
-    # 초기화
     frame_count = 0
     inference_times = []
     detection_log = []
@@ -158,7 +157,7 @@ def process_video(cap, limit_time=60):
     first_alert_time = None
     first_alert_reason = None
     first_alert_image = None
-    st.session_state.initial_alerted = False
+    st.session_state.initial_alerted = False  # reset at start
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -175,33 +174,6 @@ def process_video(cap, limit_time=60):
         t0 = time.time()
         pred = v8s_model(frame, conf=0.3, iou=0.3, verbose=False)[0]
         boxes, scores, labels = ensemble_predictions([pred])
-
-        # auxiliary condition: smoke 객체 ≥3 → warning
-        smoke_boxes = [l for l in labels if l == 1]
-        if len(smoke_boxes) >= 3:
-            now = time.strftime("%H:%M:%S")
-            reason = "연기 객체 3개 이상"
-            # 최초 alert (warning or danger) 1회
-            if not st.session_state.initial_alerted:
-                st.warning(f"🚨 최초 경고 ({now}): {reason}")
-                first_alert_time = time.time() - start_time
-                first_alert_reason = reason
-                first_alert_image = frame.copy()
-                st.session_state.initial_alerted = True
-            # 누적 warning 카운트
-            st.session_state.warning_count += 1
-            # 로그에 기록
-            alert_log.append(
-                {
-                    "시간": now,
-                    "위험": "smoke",
-                    "신뢰도": "-",
-                    "농도증가율": "-",
-                    "좌표": "-",
-                    "원인": reason,
-                    "레벨": "warning",
-                }
-            )
 
         # smoke mask 성장률 계산
         seg_masks = []
@@ -235,7 +207,7 @@ def process_video(cap, limit_time=60):
         growth_ratio = fire_area / (st.session_state.prev_fire_area + 1e-6)
         st.session_state.prev_fire_area = fire_area
 
-        # per-object 처리
+        # 프레임별 처리
         for b, s, l in zip(boxes, scores, labels):
             cls = "fire" if l == 0 else "smoke"
             coord = tuple(round(x, 2) for x in b)
@@ -245,7 +217,7 @@ def process_video(cap, limit_time=60):
                 {"시간": now, "클래스": cls, "신뢰도": round(s, 2), "좌표": coord}
             )
 
-            # 연기 농도 변화율
+            # smoke 농도 변화율
             ig = 1.0
             if cls == "smoke":
                 x1, y1, x2, y2 = [int(v * d) for v, d in zip(b, (w, h, w, h))]
@@ -256,10 +228,11 @@ def process_video(cap, limit_time=60):
                     ig = mi / (prev_int + 1e-6)
                     st.session_state.prev_smoke_intensity[str(coord)] = mi
 
-            # 리스크 판단 & 레벨 설정
+            # 리스크 판단 & 레벨 직접 설정
             risk = False
             reason = ""
-            level = "warning"
+            level = "warning"  # 기본 warning
+
             if cls == "fire":
                 if not allow_fire and s >= 0.6:
                     risk, reason = True, "허용되지 않은 위치(신뢰도>=0.6)"
@@ -268,7 +241,7 @@ def process_video(cap, limit_time=60):
                     level = "danger"
                 elif smoke_growth > 1.5:
                     risk, reason = True, f"연기영역팽창>1.5x({smoke_growth:.2f})"
-            else:
+            else:  # smoke
                 if not allow_fire:
                     risk, reason = True, "허용되지 않은 위치에서 연기 감지됨"
                 elif s >= 0.7 and ig > 1.1:
@@ -281,9 +254,10 @@ def process_video(cap, limit_time=60):
                     risk, reason = True, f"연기영역팽창>1.3x({smoke_growth:.2f})"
 
             if risk:
-                severity = level
-                # 최초 warning/danger alert
-                if not st.session_state.initial_alerted and severity in (
+                severity_text = level  # "caution"/"warning"/"danger"
+
+                # 최초 alert (warning or danger) 1회
+                if not st.session_state.initial_alerted and severity_text in (
                     "warning",
                     "danger",
                 ):
@@ -292,12 +266,14 @@ def process_video(cap, limit_time=60):
                     first_alert_reason = reason
                     first_alert_image = vis.copy()
                     st.session_state.initial_alerted = True
+
                 # 누적 카운트
-                if severity == "warning":
+                if severity_text == "warning":
                     st.session_state.warning_count += 1
-                elif severity == "danger":
+                elif severity_text == "danger":
                     st.session_state.danger_count += 1
-                # 로그
+
+                # alert 로그
                 alert_log.append(
                     {
                         "시간": now,
@@ -306,7 +282,7 @@ def process_video(cap, limit_time=60):
                         "농도증가율": round(ig, 2) if cls == "smoke" else "-",
                         "좌표": coord,
                         "원인": reason,
-                        "레벨": severity,
+                        "레벨": severity_text,
                     }
                 )
 
@@ -314,13 +290,15 @@ def process_video(cap, limit_time=60):
         log_table.dataframe(pd.DataFrame(detection_log), use_container_width=True)
         alert_table.dataframe(pd.DataFrame(alert_log), use_container_width=True)
 
-        # 경고/위험 임계치 알림 (1회씩)
+        # 누적 warning 10회 → 경고 알림 1회
         if (
             st.session_state.warning_count == 10
             and not st.session_state.threshold_warning_alerted
         ):
             st.warning("⚠️ warning 10회 누적: 경고 알림")
             st.session_state.threshold_warning_alerted = True
+
+        # 누적 danger 5회 → 위험 알림 1회
         if (
             st.session_state.danger_count == 5
             and not st.session_state.threshold_danger_alerted
@@ -341,13 +319,13 @@ def process_video(cap, limit_time=60):
     )
 
 
-# ─── 영상 입력 처리 ─────────────────────────────────────────────────
+# ─── 입력 소스별 처리 ─────────────────────────────────────────────
 option = st.radio("🎥 입력 속성 선택", ["웹캠", "영상 업로드"])
 if option == "웹캠":
     if st.checkbox("▶️ 웹캠 시작"):
         cap = cv2.VideoCapture(0)
         elapsed, fa_t, fa_img, fa_r = process_video(cap, TEST_DURATION)
-else:
+elif option == "영상 업로드":
     file = st.file_uploader("📁 영상 업로드", type=["mp4", "avi", "mov"])
     if file:
         tmp = tempfile.NamedTemporaryFile(delete=False)
