@@ -1,0 +1,9 @@
+streamlit==1.35.0
+opencv-python==4.9.0.80
+numpy==1.26.4
+pandas==2.2.2
+ultralytics==8.1.28
+ensemble-boxes==1.0.9
+python-dotenv==1.0.1
+smtplib3==1.0.0
+email-validator==2.1.1

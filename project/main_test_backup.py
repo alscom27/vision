@@ -6,11 +6,24 @@ import numpy as np
 import pandas as pd
 from ultralytics import YOLO
 from ensemble_boxes import weighted_boxes_fusion
-from collections import defaultdict
+import threading
+
+# 이메일 발송 유틸 import
+import email_utils  # send_alert_email_with_image 포함
+
+
+# ─── 비동기 이메일 전송 ─────────────────────────────────────────
+def send_email_async(send_func, *args, **kwargs):
+    thread = threading.Thread(target=send_func, args=args, kwargs=kwargs, daemon=True)
+    thread.start()
+
 
 # ─── 페이지 레이아웃 설정 ─────────────────────────────────────────
 st.set_page_config(layout="wide")
-st.title("🔥 화재/연기 실시간 탐지 시스템")
+st.title("🔥 화재 경고 알림 서비스 데모")
+st.markdown("### 화재/연기 실시간 탐지 시스템")
+st.markdown("- 사용 모델 : YOLOv8s, YOLO11n-seg")
+st.markdown("---")
 
 # ─── 모델 옵션 정의 ─────────────────────────────────────────────────
 model_options = {
@@ -26,7 +39,22 @@ seg_model = YOLO(model_options["YOLO11n-seg-smoke"])
 FRAME_WINDOW = st.empty()
 TEST_DURATION = 60  # 테스트 지속 시간(초)
 
+
 # ─── 전역/세션 상태 초기화 ─────────────────────────────────────────
+def reset_alert_state():
+    st.session_state.initial_alerted = False
+    st.session_state.threshold_warning_alerted = False
+    st.session_state.threshold_danger_alerted = False
+    st.session_state.warning_count = 0
+    st.session_state.danger_count = 0
+    st.session_state.prev_fire_area = 0
+    st.session_state.prev_smoke_mask_area = 0
+    st.session_state.prev_smoke_intensity = {}
+
+
+if "prev_fire_area" not in st.session_state:
+    reset_alert_state()
+
 frame_count = 0
 inference_times = []
 detection_log = []
@@ -34,27 +62,6 @@ alert_log = []
 first_alert_time = None
 first_alert_reason = None
 first_alert_image = None
-
-if "prev_fire_area" not in st.session_state:
-    st.session_state.prev_fire_area = 0
-if "prev_smoke_mask_area" not in st.session_state:
-    st.session_state.prev_smoke_mask_area = 0
-if "prev_smoke_intensity" not in st.session_state:
-    st.session_state.prev_smoke_intensity = {}
-
-# 누적 알림 카운터
-if "warning_count" not in st.session_state:
-    st.session_state.warning_count = 0
-if "danger_count" not in st.session_state:
-    st.session_state.danger_count = 0
-
-# 한 번만 띄울 알림 플래그
-if "initial_alerted" not in st.session_state:
-    st.session_state.initial_alerted = False
-if "threshold_warning_alerted" not in st.session_state:
-    st.session_state.threshold_warning_alerted = False
-if "threshold_danger_alerted" not in st.session_state:
-    st.session_state.threshold_danger_alerted = False
 
 # ─── 카메라 위치 설정 ───────────────────────────────────────────────
 LOCATION_INFO = {
@@ -132,92 +139,118 @@ def draw_boxes(frame, boxes, scores, labels):
 
 
 def draw_masks(frame, masks, color=(0, 0, 255), alpha=0.4):
-    if not isinstance(masks, (list, tuple)) or len(masks) == 0:
+    # if not masks:
+    if masks is None or len(masks) == 0:
         return frame
     h, w = frame.shape[:2]
     for m in masks:
         m_np = m.cpu().numpy().astype(np.uint8)
         rm = cv2.resize(m_np, (w, h), interpolation=cv2.INTER_NEAREST)
-        cm = np.zeros_like(frame, dtype=np.uint8)
+        cm = np.zeros_like(frame)
         cm[rm > 0.5] = color
         frame = cv2.addWeighted(cm, alpha, frame, 1 - alpha, 0)
     return frame
 
 
-# ─── 메인 처리 루프 ─────────────────────────────────────────────────
+# ─── 비디오 처리 ─────────────────────────────────────────────────────
 def process_video(cap, limit_time=60):
     global frame_count, inference_times, detection_log, alert_log
     global first_alert_time, first_alert_reason, first_alert_image
 
     frame_count = 0
-    inference_times = []
-    detection_log = []
-    alert_log = []
-    start_time = time.time()
+    inference_times.clear()
+    detection_log.clear()
+    alert_log.clear()
     first_alert_time = None
     first_alert_reason = None
     first_alert_image = None
-    st.session_state.initial_alerted = False  # reset at start
+    st.session_state.initial_alerted = False
 
+    start = time.time()
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
-
-        # 전처리
         frame = cv2.resize(frame, (640, 360))
         frame = cv2.convertScaleAbs(frame, alpha=1.2, beta=15)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         h, w = frame.shape[:2]
 
-        # 추론
         t0 = time.time()
         pred = v8s_model(frame, conf=0.3, iou=0.3, verbose=False)[0]
         boxes, scores, labels = ensemble_predictions([pred])
+        inference_times.append(time.time() - t0)
 
-        # smoke mask 성장률 계산
-        seg_masks = []
-        smoke_growth = 1.0
+        now = time.strftime("%H:%M:%S")
+        # segmentation & smoke growth
+        seg_masks, smoke_growth = [], 1.0
         if 1 in labels:
             res = seg_model(frame, conf=0.3, iou=0.3, verbose=False)[0]
-            if res.masks is not None and len(res.masks.data) > 0:
+            if res.masks and len(res.masks.data) > 0:
                 seg_masks = list(res.masks.data)
                 agg = np.zeros((h, w), dtype=np.uint8)
                 for m in seg_masks:
                     m_np = m.cpu().numpy().astype(np.uint8)
                     rm = cv2.resize(m_np, (w, h), interpolation=cv2.INTER_NEAREST)
                     agg |= (rm > 0.5).astype(np.uint8)
-                curr_area = int(agg.sum())
-                prev_area = st.session_state.prev_smoke_mask_area
-                smoke_growth = curr_area / (prev_area + 1e-6)
-                st.session_state.prev_smoke_mask_area = curr_area
+                curr = agg.sum()
+                prev = st.session_state.prev_smoke_mask_area
+                smoke_growth = curr / (prev + 1e-6)
+                st.session_state.prev_smoke_mask_area = curr
 
-        inference_times.append(time.time() - t0)
-
-        # 시각화
+        # 그리기
         vis = draw_masks(frame.copy(), seg_masks)
         vis = draw_boxes(vis, boxes, scores, labels)
         FRAME_WINDOW.image(vis, channels="BGR", use_container_width=True)
 
-        # 시간 & 면적 변화
-        now = time.strftime("%H:%M:%S")
-        fire_area = sum(
-            (b[2] - b[0]) * (b[3] - b[1]) for b, l in zip(boxes, labels) if l == 0
-        )
-        growth_ratio = fire_area / (st.session_state.prev_fire_area + 1e-6)
-        st.session_state.prev_fire_area = fire_area
-
-        # 프레임별 처리
+        # 전체 탐지 로그
         for b, s, l in zip(boxes, scores, labels):
             cls = "fire" if l == 0 else "smoke"
             coord = tuple(round(x, 2) for x in b)
-
-            # detection 로그
             detection_log.append(
                 {"시간": now, "클래스": cls, "신뢰도": round(s, 2), "좌표": coord}
             )
+        log_table.dataframe(pd.DataFrame(detection_log), use_container_width=True)
 
-            # smoke 농도 변화율
+        # 최초 경고: smoke>=3
+        if labels.count(1) >= 3:
+            reason = "연기 객체 3개 이상"
+            if not st.session_state.initial_alerted:
+                st.warning(f"🚨 최초 경고 ({now}): {reason}")
+                annotated = vis.copy()
+                # 비동기 전송
+                send_email_async(
+                    email_utils.send_alert_email_with_image,
+                    f"🚨 최초 경고 발생: {selected_display}",
+                    f"시간: {now}\n위치: {selected_display}\n원인: {reason}",
+                    annotated,
+                )
+                first_alert_time = time.time() - start
+                first_alert_reason = reason
+                first_alert_image = annotated
+                st.session_state.initial_alerted = True
+            st.session_state.warning_count += 1
+            alert_log.append(
+                {
+                    "시간": now,
+                    "위험": "smoke",
+                    "신뢰도": "-",
+                    "농도증가율": "-",
+                    "좌표": "-",
+                    "원인": reason,
+                    "레벨": "warning",
+                }
+            )
+
+        # fire/smoke 위험 판단
+        fire_area = sum(
+            (b[2] - b[0]) * (b[3] - b[1]) for b, l in zip(boxes, labels) if l == 0
+        )
+        growth = fire_area / (st.session_state.prev_fire_area + 1e-6)
+        st.session_state.prev_fire_area = fire_area
+        for b, s, l in zip(boxes, scores, labels):
+            cls = "fire" if l == 0 else "smoke"
+            coord = tuple(round(x, 2) for x in b)
             ig = 1.0
             if cls == "smoke":
                 x1, y1, x2, y2 = [int(v * d) for v, d in zip(b, (w, h, w, h))]
@@ -227,53 +260,55 @@ def process_video(cap, limit_time=60):
                     prev_int = st.session_state.prev_smoke_intensity.get(str(coord), mi)
                     ig = mi / (prev_int + 1e-6)
                     st.session_state.prev_smoke_intensity[str(coord)] = mi
-
-            # 리스크 판단 & 레벨 직접 설정
             risk = False
+            level = "warning"
             reason = ""
-            level = "warning"  # 기본 warning
-
             if cls == "fire":
                 if not allow_fire and s >= 0.6:
-                    risk, reason = True, "허용되지 않은 위치(신뢰도>=0.6)"
-                elif growth_ratio > 3 and s >= 0.7:
-                    risk, reason = True, f"화재 면적 급성장 ({growth_ratio:.1f}배)"
-                    level = "danger"
+                    risk, reason = True, "허용되지 않은 위치 불 감지됨 (신뢰도>=0.6)"
+                elif growth > 3 and s >= 0.7:
+                    risk, level, reason = (
+                        True,
+                        "danger",
+                        f"화재 면적 급성장({growth:.1f}배)",
+                    )
                 elif smoke_growth > 1.5:
                     risk, reason = True, f"연기영역팽창>1.5x({smoke_growth:.2f})"
-            else:  # smoke
+            else:
                 if not allow_fire:
                     risk, reason = True, "허용되지 않은 위치에서 연기 감지됨"
                 elif s >= 0.7 and ig > 1.1:
-                    risk, reason = True, f"연기신뢰도≥0.7 & 농도증가율>1.1x({ig:.2f})"
-                    level = "caution"
+                    risk, level, reason = (
+                        True,
+                        "caution",
+                        f"연기신뢰도≥0.7&농도증가율>1.1x({ig:.2f})",
+                    )
                 elif ig > 1.5:
-                    risk, reason = True, f"연기농도증가율>1.5x({ig:.2f})"
-                    level = "danger"
+                    risk, level, reason = (
+                        True,
+                        "danger",
+                        f"연기농도증가율>1.5x({ig:.2f})",
+                    )
                 elif smoke_growth > 1.3:
                     risk, reason = True, f"연기영역팽창>1.3x({smoke_growth:.2f})"
-
             if risk:
-                severity_text = level  # "caution"/"warning"/"danger"
-
-                # 최초 alert (warning or danger) 1회
-                if not st.session_state.initial_alerted and severity_text in (
-                    "warning",
-                    "danger",
-                ):
+                if not st.session_state.initial_alerted:
                     st.warning(f"🚨 최초 경고 ({now}): {reason}")
-                    first_alert_time = time.time() - start_time
+                    annotated = vis.copy()
+                    send_email_async(
+                        email_utils.send_alert_email_with_image,
+                        f"🚨 최초 경고 발생: {selected_display}",
+                        f"시간: {now}\n위치: {selected_display}\n원인: {reason}",
+                        annotated,
+                    )
+                    first_alert_time = time.time() - start
                     first_alert_reason = reason
-                    first_alert_image = vis.copy()
+                    first_alert_image = annotated
                     st.session_state.initial_alerted = True
-
-                # 누적 카운트
-                if severity_text == "warning":
+                if level == "warning":
                     st.session_state.warning_count += 1
-                elif severity_text == "danger":
+                if level == "danger":
                     st.session_state.danger_count += 1
-
-                # alert 로그
                 alert_log.append(
                     {
                         "시간": now,
@@ -282,52 +317,59 @@ def process_video(cap, limit_time=60):
                         "농도증가율": round(ig, 2) if cls == "smoke" else "-",
                         "좌표": coord,
                         "원인": reason,
-                        "레벨": severity_text,
+                        "레벨": level,
                     }
                 )
 
-        # 테이블 갱신
-        log_table.dataframe(pd.DataFrame(detection_log), use_container_width=True)
         alert_table.dataframe(pd.DataFrame(alert_log), use_container_width=True)
 
-        # 누적 warning 10회 → 경고 알림 1회
+        # 임계치 알림
         if (
             st.session_state.warning_count == 10
             and not st.session_state.threshold_warning_alerted
         ):
             st.warning("⚠️ warning 10회 누적: 경고 알림")
+            annotated = vis.copy()
+            send_email_async(
+                email_utils.send_alert_email_with_image,
+                f"⚠️ Warning 10회 누적: {selected_display}",
+                f"현재까지 warning이 10회 누적되었습니다.\n위치: {selected_display}",
+                annotated,
+            )
             st.session_state.threshold_warning_alerted = True
-
-        # 누적 danger 5회 → 위험 알림 1회
         if (
             st.session_state.danger_count == 5
             and not st.session_state.threshold_danger_alerted
         ):
             st.error("🛑 danger 5회 누적: 위험 알림")
+            annotated = vis.copy()
+            send_email_async(
+                email_utils.send_alert_email_with_image,
+                f"🛑 Danger 5회 누적: {selected_display}",
+                f"현재까지 danger가 5회 누적되었습니다.\n위치: {selected_display}",
+                annotated,
+            )
             st.session_state.threshold_danger_alerted = True
 
         frame_count += 1
-        if time.time() - start_time > limit_time:
+        if time.time() - start > limit_time:
             break
 
     cap.release()
-    return (
-        time.time() - start_time,
-        first_alert_time,
-        first_alert_image,
-        first_alert_reason,
-    )
+    return time.time() - start, first_alert_time, first_alert_image, first_alert_reason
 
 
-# ─── 입력 소스별 처리 ─────────────────────────────────────────────
+# ─── 영상 입력 처리 ─────────────────────────────────────────────────
 option = st.radio("🎥 입력 속성 선택", ["웹캠", "영상 업로드"])
 if option == "웹캠":
     if st.checkbox("▶️ 웹캠 시작"):
+        reset_alert_state()
         cap = cv2.VideoCapture(0)
         elapsed, fa_t, fa_img, fa_r = process_video(cap, TEST_DURATION)
-elif option == "영상 업로드":
+else:
     file = st.file_uploader("📁 영상 업로드", type=["mp4", "avi", "mov"])
     if file:
+        reset_alert_state()
         tmp = tempfile.NamedTemporaryFile(delete=False)
         tmp.write(file.read())
         cap = cv2.VideoCapture(tmp.name)
@@ -336,7 +378,7 @@ elif option == "영상 업로드":
 # ─── 결과 출력 ───────────────────────────────────────────────────
 if frame_count > 0:
     avg_fps = frame_count / elapsed
-    avg_inf = sum(inference_times) / len(inference_times)
+    avg_inf = (sum(inference_times) / len(inference_times)) if inference_times else 0
     st.markdown("## 📊 분석 결과")
     st.write(f"🔁 총 프레임 수: {frame_count}")
     st.write(f"⏱️ 총 시간: {elapsed:.2f}s")
